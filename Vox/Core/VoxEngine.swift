@@ -10,6 +10,7 @@ class VoxEngine: ObservableObject {
     @Published var lastTranscription = ""
     @Published var statusMessage = "Ready"
     @Published var isModelLoaded = false
+    @Published var hasMicPermission = false
 
     private var whisperContext: WhisperContext?
     private let recorder = AudioRecorder()
@@ -20,7 +21,6 @@ class VoxEngine: ObservableObject {
     @AppStorage("silenceThreshold") var silenceThreshold = 1.5
 
     private var modelsDirectory: URL {
-        // Look for models in the app's Models directory or a shared location
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let modelsDir = appSupport.appendingPathComponent("Vox/Models")
         try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
@@ -28,7 +28,29 @@ class VoxEngine: ObservableObject {
     }
 
     init() {
+        checkMicPermission()
         loadModel()
+    }
+
+    private func checkMicPermission() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            hasMicPermission = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                Task { @MainActor in
+                    self?.hasMicPermission = granted
+                    if !granted {
+                        self?.statusMessage = "Mic access denied"
+                    }
+                }
+            }
+        case .denied, .restricted:
+            hasMicPermission = false
+            statusMessage = "Mic access denied — open System Settings > Privacy > Microphone"
+        @unknown default:
+            hasMicPermission = false
+        }
     }
 
     func loadModel() {
@@ -46,10 +68,13 @@ class VoxEngine: ObservableObject {
             : fallbackPath
 
         guard FileManager.default.fileExists(atPath: pathToUse.path) else {
-            statusMessage = "Model not found: \(selectedModel)"
+            statusMessage = "Model not found — run scripts/download-model.sh"
+            print("[Vox] Model not found at \(modelPath.path) or \(fallbackPath.path)")
             isModelLoaded = false
             return
         }
+
+        print("[Vox] Loading model from \(pathToUse.path)")
 
         Task.detached { [weak self] in
             do {
@@ -82,6 +107,12 @@ class VoxEngine: ObservableObject {
             return
         }
 
+        guard hasMicPermission else {
+            checkMicPermission()
+            statusMessage = "Mic access required"
+            return
+        }
+
         do {
             let outputURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("vox-recording.wav")
@@ -90,6 +121,7 @@ class VoxEngine: ObservableObject {
             statusMessage = "Listening..."
         } catch {
             statusMessage = "Mic error: \(error.localizedDescription)"
+            print("[Vox] Recording failed: \(error)")
         }
     }
 
