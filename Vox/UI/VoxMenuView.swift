@@ -32,7 +32,7 @@ struct VoxMenuView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(engine.isRecording ? .red : .orange)
-            .disabled(!engine.isModelLoaded || engine.isTranscribing)
+            .disabled(!engine.isModelLoaded || engine.isTranscribing || !engine.hasMicPermission)
 
             // Last transcription
             if !engine.lastTranscription.isEmpty {
