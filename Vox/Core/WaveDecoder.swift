@@ -1,44 +1,89 @@
 import Foundation
+import AVFoundation
 
-/// Decodes a WAV file into float32 samples at 16kHz mono (what Whisper expects).
+/// Decodes a WAV/audio file into float32 samples at 16kHz mono (what Whisper expects).
+/// Uses AVAudioFile for robust format handling — supports any format macOS can read.
 func decodeWaveFile(_ url: URL) throws -> [Float] {
-    let data = try Data(contentsOf: url)
+    let audioFile = try AVAudioFile(forReading: url)
 
-    // WAV header is 44 bytes
-    guard data.count > 44 else {
-        throw WaveError.invalidFile
+    // Target format: 16kHz, mono, float32 (what Whisper expects)
+    guard let targetFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16000.0,
+        channels: 1,
+        interleaved: false
+    ) else {
+        throw WaveError.unsupportedFormat("Could not create target audio format")
     }
 
-    // Read WAV header fields
-    let channels = data.subdata(in: 22..<24).withUnsafeBytes { $0.load(as: UInt16.self) }
-    let sampleRate = data.subdata(in: 24..<28).withUnsafeBytes { $0.load(as: UInt32.self) }
-    let bitsPerSample = data.subdata(in: 34..<36).withUnsafeBytes { $0.load(as: UInt16.self) }
+    let sourceFormat = audioFile.processingFormat
+    let sourceFrameCount = AVAudioFrameCount(audioFile.length)
 
-    guard bitsPerSample == 16 else {
-        throw WaveError.unsupportedFormat("Expected 16-bit PCM, got \(bitsPerSample)-bit")
+    print("[Vox] Audio file: \(sourceFormat.sampleRate)Hz, \(sourceFormat.channelCount)ch, \(sourceFrameCount) frames")
+
+    // Read source audio into a buffer
+    guard let sourceBuffer = AVAudioPCMBuffer(
+        pcmFormat: sourceFormat,
+        frameCapacity: sourceFrameCount
+    ) else {
+        throw WaveError.unsupportedFormat("Could not create source buffer")
     }
+    try audioFile.read(into: sourceBuffer)
 
-    // Extract raw PCM data (skip 44-byte header)
-    let pcmData = data.subdata(in: 44..<data.count)
-    let sampleCount = pcmData.count / (Int(channels) * 2) // 2 bytes per 16-bit sample
-
-    // Convert Int16 PCM to Float32, take first channel if stereo
-    var floatSamples = [Float](repeating: 0, count: sampleCount)
-
-    pcmData.withUnsafeBytes { rawBuffer in
-        let int16Buffer = rawBuffer.bindMemory(to: Int16.self)
-        for i in 0..<sampleCount {
-            let sampleIndex = i * Int(channels) // Skip extra channels
-            if sampleIndex < int16Buffer.count {
-                floatSamples[i] = Float(int16Buffer[sampleIndex]) / 32768.0
-            }
+    // If already 16kHz mono float32, return directly
+    if sourceFormat.sampleRate == 16000.0 && sourceFormat.channelCount == 1 {
+        guard let channelData = sourceBuffer.floatChannelData else {
+            throw WaveError.unsupportedFormat("Could not read float channel data")
         }
+        let frameCount = Int(sourceBuffer.frameLength)
+        return Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
     }
 
-    return floatSamples
+    // Convert to 16kHz mono
+    guard let converter = AVAudioConverter(from: sourceFormat, to: targetFormat) else {
+        throw WaveError.unsupportedFormat("Could not create audio converter from \(sourceFormat) to \(targetFormat)")
+    }
+
+    // Calculate output frame count based on sample rate ratio
+    let ratio = 16000.0 / sourceFormat.sampleRate
+    let outputFrameCount = AVAudioFrameCount(Double(sourceFrameCount) * ratio)
+
+    guard let outputBuffer = AVAudioPCMBuffer(
+        pcmFormat: targetFormat,
+        frameCapacity: outputFrameCount
+    ) else {
+        throw WaveError.unsupportedFormat("Could not create output buffer")
+    }
+
+    var error: NSError?
+    let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+        outStatus.pointee = .haveData
+        return sourceBuffer
+    }
+
+    converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+
+    if let error = error {
+        throw WaveError.unsupportedFormat("Conversion error: \(error.localizedDescription)")
+    }
+
+    guard let channelData = outputBuffer.floatChannelData else {
+        throw WaveError.unsupportedFormat("Could not read converted channel data")
+    }
+
+    let frameCount = Int(outputBuffer.frameLength)
+    print("[Vox] Converted to \(frameCount) samples at 16kHz mono")
+    return Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
 }
 
-enum WaveError: Error {
+enum WaveError: Error, LocalizedError {
     case invalidFile
     case unsupportedFormat(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidFile: return "Invalid audio file"
+        case .unsupportedFormat(let msg): return msg
+        }
+    }
 }

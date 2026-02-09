@@ -93,7 +93,7 @@ struct AboutView: View {
 
             Text("Powered by whisper.cpp")
                 .font(.caption)
-                .foregroundColor(.tertiary)
+                .foregroundStyle(.tertiary)
 
             Link("id8Labs", destination: URL(string: "https://id8labs.app")!)
                 .font(.caption)

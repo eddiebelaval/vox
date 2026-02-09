@@ -117,15 +117,29 @@ class VoxEngine: ObservableObject {
             }
 
             do {
+                let fileSize = try FileManager.default.attributesOfItem(atPath: recordingURL.path)[.size] as? Int ?? 0
+                print("[Vox] Recording file size: \(fileSize) bytes at \(recordingURL.path)")
+
+                if fileSize < 100 {
+                    await MainActor.run {
+                        self.isTranscribing = false
+                        self.statusMessage = "Recording too short"
+                    }
+                    return
+                }
+
                 let samples = try decodeWaveFile(recordingURL)
+                print("[Vox] Decoded \(samples.count) samples")
+
                 await context.fullTranscribe(samples: samples)
                 let text = await context.getTranscription()
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                print("[Vox] Transcription: \(trimmed)")
 
                 await MainActor.run {
                     self.lastTranscription = trimmed
                     self.isTranscribing = false
-                    self.statusMessage = "Done"
+                    self.statusMessage = trimmed.isEmpty ? "No speech detected" : "Done"
 
                     if !trimmed.isEmpty {
                         self.copyToClipboard(trimmed)
@@ -135,9 +149,10 @@ class VoxEngine: ObservableObject {
                     }
                 }
             } catch {
+                print("[Vox] Error: \(error)")
                 await MainActor.run {
                     self.isTranscribing = false
-                    self.statusMessage = "Transcription error"
+                    self.statusMessage = "Error: \(error.localizedDescription)"
                 }
             }
         }
